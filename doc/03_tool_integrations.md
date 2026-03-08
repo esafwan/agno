@@ -1,375 +1,159 @@
-# Tool Integrations
+# Tool Integrations Handbook
 
-Agno ships with **130+ pre-built tool integrations** organised into toolkits. Any Python function can also be a tool via the `@tool` decorator.
+Agno ships with **130+ pre-built tool integrations** organized into toolkits. Any Python function can also be a tool via the `@tool` decorator. This handbook provides a deep dive into how tools work, how to create them, and how to handle complex integration scenarios like authentication, sessions, and background jobs.
 
-**Directory:** `libs/agno/agno/tools/`
+**Core Directory:** `libs/agno/agno/tools/`
 
 ---
 
-## Custom tools — the `@tool` decorator
+## 1. Architecture & Philosophy
 
-The simplest way to create a tool:
+Agno's tool system is built on two primary pillars: the `Function` class and the `Toolkit` class.
+
+### The `Function` Class
+The `Function` class (`libs/agno/agno/tools/function.py`) is the atomic unit of a tool. It wraps a Python callable and:
+- **Auto-generates JSON Schema**: Uses Python type hints and docstrings to build the schema that LLMs use to understand the tool.
+- **Handles Execution**: Manages sync/async execution, validation (via Pydantic), and error handling.
+- **State Management**: Can inject `agent`, `team`, or `run_context` into the function arguments at runtime.
+
+### The `Toolkit` Class
+The `Toolkit` class (`libs/agno/agno/tools/toolkit.py`) groups related functions together. 
+- **Connection Management**: Tools that require state (like DB connections) can override `connect()` and `close()`.
+- **Instruction Injection**: Toolkits can add specific instructions to the Agent's system prompt.
+- **Filtering**: Allows users to include or exclude specific methods from the toolkit.
+
+---
+
+## 2. Creating Custom Tools
+
+### The `@tool` Decorator
+The simplest way to create a tool is by decorating a function.
 
 ```python
 from agno.tools import tool
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 
 @tool
-def get_weather(city: str) -> str:
-    """Get the current weather for a city.
+def get_stock_price(symbol: str) -> str:
+    """Get the current stock price for a given symbol.
 
     Args:
-        city: The name of the city.
+        symbol (str): The stock symbol (e.g., AAPL).
 
     Returns:
-        A string describing current weather conditions.
+        str: The current price as a string.
     """
-    # your implementation
-    return f"Sunny, 22°C in {city}"
+    # Implementation logic (e.g., calling an API)
+    return f"150.00 USD"
 
-agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
-    tools=[get_weather],
-)
-agent.print_response("What is the weather in Paris?")
+agent = Agent(tools=[get_stock_price])
 ```
 
-Key rules for tool functions:
-- Must have a docstring (the LLM reads it to decide when to use the tool)
-- Must return a `str` (or something JSON-serialisable cast to `str`)
-- Parameters must be typed (Agno builds the JSON schema from type hints)
+**Key Parameters for `@tool`:**
+- `name`: Override the function name.
+- `description`: Override the docstring as the tool description.
+- `show_result`: If `True`, prints the result in the console.
+- `requires_confirmation`: Pauses execution for user approval.
+- `cache_results`: Enables in-memory/disk caching.
 
----
-
-## Toolkit class
-
-For grouping multiple related tools:
+### Subclassing `Toolkit`
+For more complex integrations, subclass `Toolkit`. This is ideal for tools that share configuration (like API keys) or state.
 
 ```python
 from agno.tools import Toolkit
 
-class WeatherTools(Toolkit):
-    def current_weather(self, city: str) -> str:
-        """Get current weather for a city."""
-        ...
+class MyServiceTools(Toolkit):
+    def __init__(self, api_key: str):
+        super().__init__(name="my_service")
+        self.api_key = api_key
+        # Register methods as tools
+        self.register(self.fetch_data)
 
-    def forecast(self, city: str, days: int) -> str:
-        """Get weather forecast for a city."""
-        ...
-
-agent = Agent(tools=[WeatherTools()])
+    def fetch_data(self, query: str) -> str:
+        """Fetch data from MyService."""
+        # Use self.api_key here
+        return f"Results for {query}"
 ```
 
 ---
 
-## Controlling tool use
+## 3. Authentication & API Integration
 
+Agno follows standardized patterns for handling authentication and API calls.
+
+### API Call Patterns
+Most integrations use the `requests` library. See `libs/agno/agno/tools/api.py` for a generic implementation.
+
+**Common Auth Methods:**
+1.  **API Keys**: Passed via constructor and added to headers (e.g., `Authorization: Bearer <key>`).
+2.  **Basic Auth**: Using `requests.auth.HTTPBasicAuth`.
+3.  **OAuth/Tokens**: Handled manually in the `Toolkit.__init__` or injected via environment variables.
+
+### Example: Secure API Toolkit
 ```python
-agent = Agent(
-    tools=[DuckDuckGoTools(), CalculatorTools()],
-    tool_choice="auto",          # model decides which tools to use
-    # tool_choice="none"         # disable all tools
-    # tool_choice="required"     # force at least one tool call
-    max_tool_calls=5,            # cap tool invocations per run
-    show_tool_calls=True,        # print tool call details
-    stream_intermediate_steps=True,  # stream tool results in real-time
-)
+import requests
+from agno.tools import Toolkit
+
+class SecureApiToolkit(Toolkit):
+    def __init__(self, api_key: str, base_url: str):
+        super().__init__(name="secure_api")
+        self.api_key = api_key
+        self.base_url = base_url
+        self.register(self.call_endpoint)
+
+    def call_endpoint(self, path: str) -> str:
+        """Call a secure endpoint."""
+        headers = {"X-API-KEY": self.api_key}
+        response = requests.get(f"{self.base_url}/{path}", headers=headers)
+        return response.text
 ```
 
 ---
 
-## Web & Search
+## 4. Advanced Features
 
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `DuckDuckGoTools` | `agno.tools.duckduckgo` | Free, no API key required |
-| `TavilyTools` | `agno.tools.tavily` | AI-optimised search results |
-| `ExaTools` | `agno.tools.exa` | Semantic neural search |
-| `SerperApiTools` | `agno.tools.serper` | Google search via Serper |
-| `SerpApiTools` | `agno.tools.serpapi` | Google search via SerpAPI |
-| `BraveSearchTools` | `agno.tools.bravesearch` | Privacy-focused search |
-| `SearxngTools` | `agno.tools.searxng` | Self-hosted meta-search |
-| `JinaTools` | `agno.tools.jina` | Jina AI reader + search |
-| `BaiduSearchTools` | `agno.tools.baidusearch` | Baidu search (Chinese) |
-| `WebSearchTools` | `agno.tools.websearch` | Generic web search wrapper |
+### Human-in-the-Loop (HITL)
+Agno supports blocking tool execution until a human provides input or confirmation.
+- **`requires_confirmation=True`**: The agent will wait for a "yes/no" before proceeding.
+- **`requires_user_input=True`**: The agent will pause and wait for specific data from the user.
 
+### External Execution
+If a tool involves UI interactions or long-running tasks that shouldn't block the backend, use `external_execution=True`. The agent will produce a "paused" state, allowing the frontend to take over.
+
+### Caching
+Reduce API costs and latency by caching tool outputs.
 ```python
-from agno.tools.tavily import TavilyTools
-agent = Agent(tools=[TavilyTools(search_depth="advanced", max_tokens=5000)])
+@tool(cache_results=True, cache_ttl=3600)  # Cache for 1 hour
+def heavy_computation(data: str) -> str:
+    ...
 ```
 
----
-
-## Web Scraping & Content Extraction
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `WebsiteTools` | `agno.tools.website` | Fetch + parse any URL |
-| `FirecrawlTools` | `agno.tools.firecrawl` | Firecrawl API — markdown output |
-| `Crawl4aiTools` | `agno.tools.crawl4ai` | Async scraping |
-| `BrowserbaseTools` | `agno.tools.browserbase` | Headless browser in the cloud |
-| `BrightdataTools` | `agno.tools.brightdata` | Proxy-based scraping |
-| `OxylabsTools` | `agno.tools.oxylabs` | Oxylabs scraper API |
-| `SpiderTools` | `agno.tools.spider` | Spider.cloud |
-| `Newspaper4kTools` | `agno.tools.newspaper4k` | Article extraction |
-| `TrafilaturaTools` | `agno.tools.trafilatura` | Main content extraction |
-| `ScrapegraphTools` | `agno.tools.scrapegraph` | AI-powered scraping |
-| `AgentQLTools` | `agno.tools.agentql` | Browser automation via AgentQL |
+### Background Jobs & Webhooks
+While Agno doesn't have a built-in "scheduler," it integrates with systems like **E2B** or **Airflow**.
+- **E2B Tools**: Support `run_background_command` for running code in isolated sandboxes.
+- **Webhooks**: Handled at the application level; tools can be used to *trigger* webhooks in external systems.
 
 ---
 
-## Data Sources & Knowledge
+## 5. Best Practices & Nuances
 
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `ArxivTools` | `agno.tools.arxiv` | Search and download ArXiv papers |
-| `PubMedTools` | `agno.tools.pubmed` | PubMed medical literature |
-| `HackerNewsTools` | `agno.tools.hackernews` | HN stories and comments |
-| `RedditTools` | `agno.tools.reddit` | Reddit posts and comments |
-| `WikipediaTools` | `agno.tools.wikipedia` | Wikipedia search |
-| `YoutubeTools` | `agno.tools.youtube` | Video metadata, transcripts |
-| `OpenWeatherTools` | `agno.tools.openweather` | Weather forecasts |
-
-```python
-from agno.tools.arxiv import ArxivTools
-agent = Agent(
-    tools=[ArxivTools()],
-    instructions="Search ArXiv for relevant papers and summarise findings.",
-)
-agent.print_response("Latest papers on diffusion models for protein folding")
-```
+-   **Docstrings are Code**: The LLM *only* knows what your tool does through the docstring. Be explicit about parameters and return values.
+-   **Type Hints**: Always use Python type hints. Agno uses these to build the JSON schema (`str`, `int`, `List[str]`, etc.).
+-   **Return Strings**: Tools should ideally return strings or JSON-serializable objects.
+-   **Error Handling**: Wrap tool logic in `try-except`. Return meaningful error messages to the LLM so it can attempt a "fix" or report the issue.
+-   **Security**: Validate paths (use `Toolkit._check_path`) to prevent directory traversal in file-based tools.
 
 ---
 
-## Financial & Business
+## 6. Popular Toolkit Quick Reference
 
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `YFinanceTools` | `agno.tools.yfinance` | Yahoo Finance — stocks, crypto, news |
-| `FinancialDatasetsTools` | `agno.tools.financial_datasets` | FRED, economic data |
-| `OpenBBTools` | `agno.tools.openbb` | OpenBB investment platform |
-| `ShopifyTools` | `agno.tools.shopify` | Shopify store operations (80+ methods) |
+| Toolkit | Category | Auth Req |
+|---------|----------|----------|
+| `DuckDuckGoTools` | Search | No |
+| `YFinanceTools` | Finance | No |
+| `GithubTools` | DevOps | Personal Access Token |
+| `PostgresTools` | Database | Connection String |
+| `GmailTools` | Google | OAuth2 / Credentials |
+| `SlackTools` | Comm | Bot Token |
 
-```python
-from agno.tools.yfinance import YFinanceTools
-
-agent = Agent(
-    tools=[YFinanceTools(
-        stock_price=True,
-        analyst_recommendations=True,
-        company_news=True,
-        income_statements=True,
-    )],
-)
-agent.print_response("Analyse Apple's financial health and analyst sentiment")
-```
-
----
-
-## Database & SQL
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `SqlTools` | `agno.tools.sql` | Generic SQL execution |
-| `PostgresTools` | `agno.tools.postgres` | PostgreSQL read/write |
-| `DuckDbTools` | `agno.tools.duckdb` | DuckDB analytics queries |
-| `Neo4jTools` | `agno.tools.neo4j` | Neo4j graph queries |
-| `GoogleBigQueryTools` | `agno.tools.google.bigquery` | Google BigQuery |
-| `RedshiftTools` | `agno.tools.redshift` | AWS Redshift |
-| `PandasTools` | `agno.tools.pandas` | DataFrame operations |
-| `CsvTools` | `agno.tools.csv_toolkit` | CSV file read/transform |
-
-```python
-from agno.tools.duckdb import DuckDbTools
-
-agent = Agent(
-    tools=[DuckDbTools()],
-    instructions="Write and execute DuckDB SQL to answer data questions.",
-)
-agent.print_response("What are the top 5 countries by GDP in data.csv?")
-```
-
----
-
-## Cloud Platforms
-
-### Google
-
-| Toolkit | Import |
-|---------|--------|
-| `GmailTools` | `agno.tools.google.gmail` |
-| `GoogleDriveTools` | `agno.tools.google.drive` |
-| `GoogleSheetsTools` | `agno.tools.google.sheets` |
-| `GoogleCalendarTools` | `agno.tools.google.calendar` |
-| `GoogleMapsTools` | `agno.tools.google.maps` |
-| `GoogleBigQueryTools` | `agno.tools.google.bigquery` |
-
-### AWS
-
-| Toolkit | Import |
-|---------|--------|
-| `AwsLambdaTools` | `agno.tools.aws_lambda` |
-| `AwsSesTools` | `agno.tools.aws_ses` |
-
-### Azure
-
-| Toolkit | Import |
-|---------|--------|
-| `AzureBlobTools` | `agno.tools.azure_blob` |
-
-### GitHub / Version Control
-
-| Toolkit | Import |
-|---------|--------|
-| `GithubTools` | `agno.tools.github` (70KB — repos, PRs, issues, code, actions) |
-| `BitbucketTools` | `agno.tools.bitbucket` |
-
-```python
-from agno.tools.github import GithubTools
-
-agent = Agent(
-    tools=[GithubTools(access_token="ghp_...")],
-    instructions="Help manage the GitHub repository.",
-)
-agent.print_response("List open PRs and their review status for agno-agi/agno")
-```
-
----
-
-## Communication & Productivity
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `SlackTools` | `agno.tools.slack` | Send/read Slack messages |
-| `DiscordTools` | `agno.tools.discord` | Discord bot operations |
-| `TelegramTools` | `agno.tools.telegram` | Telegram messaging |
-| `WhatsAppTools` | `agno.tools.whatsapp` | WhatsApp via Twilio |
-| `EmailTools` | `agno.tools.email` | SMTP email |
-| `ResendTools` | `agno.tools.resend` | Resend transactional email |
-| `TwilioTools` | `agno.tools.twilio` | SMS + voice |
-
----
-
-## Project Management
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `JiraTools` | `agno.tools.jira` | Issues, sprints, projects |
-| `LinearTools` | `agno.tools.linear` | Linear issues and cycles |
-| `ClickUpTools` | `agno.tools.clickup` | ClickUp tasks |
-| `TodoistTools` | `agno.tools.todoist` | Personal task management |
-| `TrelloTools` | `agno.tools.trello` | Boards, cards, lists |
-| `NotionTools` | `agno.tools.notion` | Pages, databases, blocks |
-| `ConfluenceTools` | `agno.tools.confluence` | Wiki pages |
-| `ZendeskTools` | `agno.tools.zendesk` | Support tickets |
-| `CalComTools` | `agno.tools.calcom` | Cal.com scheduling |
-| `WebexTools` | `agno.tools.webex` | Webex meetings |
-| `ZoomTools` | `agno.tools.zoom` | Zoom meetings |
-
----
-
-## AI / Media Generation
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `DalleTools` | `agno.tools.dalle` | DALL-E image generation |
-| `LumaLabTools` | `agno.tools.lumalab` | Luma Dream Machine video |
-| `FalTools` | `agno.tools.fal` | FAL.ai media models |
-| `ReplicateTools` | `agno.tools.replicate` | Replicate model hosting |
-| `ElevenLabsTools` | `agno.tools.eleven_labs` | ElevenLabs text-to-speech |
-| `CartesiaTools` | `agno.tools.cartesia` | Cartesia TTS |
-| `MlxTranscribeTools` | `agno.tools.mlx_transcribe` | Apple MLX transcription |
-| `MoviePyTools` | `agno.tools.moviepy_video` | Video editing |
-| `OpenCVTools` | `agno.tools.opencv` | Computer vision |
-| `UnsplashTools` | `agno.tools.unsplash` | Stock photo search |
-| `GiphyTools` | `agno.tools.giphy` | GIF search |
-| `SpotifyTools` | `agno.tools.spotify` | Spotify playback/search |
-
----
-
-## Code Execution & Development
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `CodingTools` | `agno.tools.coding` | Run Python code locally (28KB) |
-| `E2BTools` | `agno.tools.e2b` | Cloud code sandbox (E2B) |
-| `DaytonaTools` | `agno.tools.daytona` | Daytona dev environment |
-| `DockerTools` | `agno.tools.docker` | Docker container management |
-| `ShellTools` | `agno.tools.shell` | Local shell commands |
-| `AirflowTools` | `agno.tools.airflow` | Apache Airflow DAG operations |
-| `ApifyTools` | `agno.tools.apify` | Apify actor execution |
-
-```python
-from agno.tools.e2b import E2BTools
-
-agent = Agent(
-    tools=[E2BTools()],
-    instructions="You are a Python coding assistant. Write and execute code.",
-)
-agent.print_response("Write and run code that generates the Fibonacci sequence up to 1000")
-```
-
----
-
-## MCP (Model Context Protocol)
-
-See `doc/14_a2a_protocol.md` for the full MCP section. Quick reference:
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `MCPTools` | `agno.tools.mcp` | Single MCP server |
-| `MultiMCPTools` | `agno.tools.mcp` | Multiple MCP servers |
-| `MCPToolbox` | `agno.tools.mcp_toolbox` | MCP Toolbox for Databases |
-
-```python
-from agno.tools.mcp import MCPTools
-
-async with MCPTools("npx -y @modelcontextprotocol/server-filesystem /tmp") as mcp:
-    agent = Agent(tools=[mcp])
-    await agent.aprint_response("List all files")
-```
-
----
-
-## Special Purpose
-
-| Toolkit | Import | Description |
-|---------|--------|-------------|
-| `ParallelTools` | `agno.tools.parallel` | Execute multiple tools concurrently |
-| `UserControlFlowTools` | `agno.tools.user_control_flow` | Pause and ask the human a question |
-| `UserFeedbackTools` | `agno.tools.user_feedback` | Collect thumbs-up/down feedback |
-| `ReasoningTools` | `agno.tools.reasoning` | Built-in chain-of-thought |
-| `KnowledgeTools` | `agno.tools.knowledge` | Agentic RAG queries |
-| `Mem0Tools` | `agno.tools.mem0` | Mem0 external memory service |
-| `ZepTools` | `agno.tools.zep` | Zep memory service |
-| `StreamlitComponents` | `agno.tools.streamlit` | Render Streamlit UI components |
-
-### Parallel tool execution
-
-```python
-from agno.tools.parallel import ParallelTools
-from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools.arxiv import ArxivTools
-
-agent = Agent(
-    tools=[
-        ParallelTools(tools=[
-            DuckDuckGoTools(),
-            ArxivTools(),
-        ])
-    ],
-    instructions="Search web and ArXiv simultaneously, then synthesise.",
-)
-```
-
-### Human-in-the-loop via tools
-
-```python
-from agno.tools.user_control_flow import UserControlFlowTools
-
-agent = Agent(
-    tools=[UserControlFlowTools()],
-    instructions="If unsure, ask the user before proceeding.",
-)
-```
+For the full list of 130+ tools, see the `agno/tools/` directory.
